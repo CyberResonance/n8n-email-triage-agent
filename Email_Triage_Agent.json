@@ -1,0 +1,666 @@
+{
+  "name": "Email Triage Agent",
+  "nodes": [
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "everyX",
+              "value": 5,
+              "unit": "minutes"
+            }
+          ]
+        },
+        "simple": false,
+        "filters": {
+          "labelIds": [
+            "INBOX",
+            "UNREAD"
+          ]
+        },
+        "options": {}
+      },
+      "name": "Gmail Trigger",
+      "type": "n8n-nodes-base.gmailTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        -900,
+        0
+      ],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "",
+          "name": "Gmail"
+        }
+      }
+    },
+    {
+      "parameters": {},
+      "name": "Manual Test",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -900,
+        -200
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "return [\n { json: { id: 'demo1', threadId: 'demo1', from: { value: [{ address: 'client@example.com', name: 'Client' }] }, subject: 'Production site is down', text: 'Our checkout returns 500 since 9:00. Can you look at it today?' } },\n { json: { id: 'demo2', threadId: 'demo2', from: { value: [{ address: 'partner@example.com', name: 'Partner' }] }, subject: 'Partnership idea for Q1', text: 'Would you be open to a call next week about a joint offer?' } },\n { json: { id: 'demo3', threadId: 'demo3', from: { value: [{ address: 'friend@example.com', name: 'Friend' }] }, subject: 'Thanks!', text: 'Thanks for the tips yesterday, very helpful.' } },\n { json: { id: 'demo4', threadId: 'demo4', from: { value: [{ address: 'news@example.com', name: 'Weekly Dev News' }] }, subject: 'This week in AI', text: 'Top stories... unsubscribe here.' } },\n];"
+      },
+      "name": "Sample Emails",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -680,
+        -200
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Edit these values once after import. Emails pass through unchanged; settings are attached as `cfg`.\nconst cfg = {\n  ownerName: 'Kacper',                       // who the assistant works for\n  assistantName: 'Baizhi',                   // signature of AI replies\n  autoSend: false,                           // false = routine replies are saved as Gmail drafts (recommended)\n  ignoreSenders: ['no-reply@accounts.google.com'], // never auto-answer these\n};\nreturn $input.all().map(i => ({ json: { ...i.json, cfg } }));"
+      },
+      "name": "Config",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -460,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Normalise Gmail output (simple or raw mode) into one shape and build the classifier request.\nconst cfg = $('Config').first().json.cfg;\nconst out = [];\nfor (const it of $input.all()) {\n  const m = it.json;\n  const fromObj = m.from?.value?.[0] || {};\n  const from = fromObj.address || (String(m.From || m.from || '').match(/<([^>]+)>/) || [])[1] || String(m.From || m.from || '');\n  const fromName = fromObj.name || String(m.From || '').replace(/<[^>]+>/, '').trim();\n  const subject = String(m.subject || m.Subject || '(no subject)');\n  const body = String(m.text || m.textPlain || m.snippet || '').replace(/\\s+/g, ' ').trim().slice(0, 4000);\n  const listUnsub = !!(m.headers && (m.headers['list-unsubscribe'] || m.headers['List-Unsubscribe'])) || /unsubscribe/i.test(body);\n  const prompt = `You triage the inbox of ${cfg.ownerName}. Classify the email into exactly one category:\n- \"urgent\": important AND time-critical (client problem, payment issue, security alert, deadline today/tomorrow). ${cfg.ownerName} must handle it personally now.\n- \"important\": matters but is not urgent (proposal, meeting request, partnership, invoice to plan). ${cfg.ownerName} will schedule it.\n- \"routine\": low-stakes personal or business message a polite assistant can answer (thanks, confirmations, simple questions).\n- \"newsletter\": newsletters, promotions, notifications, subscriptions, automated mail.\nReturn JSON only: {\"category\": \"...\", \"summary\": \"max 2 sentences\", \"reply\": \"a short friendly reply for routine mail signed '${cfg.assistantName}, assistant to ${cfg.ownerName}', otherwise empty\", \"confidence\": 0.0-1.0}\nNever promise dates, prices or commitments in the reply.\n\nFrom: ${fromName} <${from}>\nSubject: ${subject}\nHas unsubscribe link: ${listUnsub}\nBody:\n${body}`;\n  out.push({ json: { id: m.id, threadId: m.threadId, from, fromName, subject, body, listUnsub,\n    requestBody: { contents: [{ parts: [{ text: prompt }] }], generationConfig: { temperature: 0.2, responseMimeType: 'application/json' } } } });\n}\nreturn out;"
+      },
+      "name": "Normalize & Build Prompt",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -240,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent",
+        "authentication": "predefinedCredentialType",
+        "nodeCredentialType": "googlePalmApi",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={{ JSON.stringify($json.requestBody) }}",
+        "options": {
+          "timeout": 60000
+        }
+      },
+      "name": "Gemini Classifier",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -20,
+        0
+      ],
+      "credentials": {
+        "googlePalmApi": {
+          "id": "",
+          "name": "Gemini API"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse the classifier answer; fall back to safe defaults on bad output.\nconst cfg = $('Config').first().json.cfg;\nconst src = $('Normalize & Build Prompt').all();\nreturn $input.all().map((it, i) => {\n  const mail = src[i]?.json || {};\n  let r = {};\n  try { r = JSON.parse(it.json.candidates?.[0]?.content?.parts?.[0]?.text || '{}'); } catch (e) { r = {}; }\n  let category = ['urgent', 'important', 'routine', 'newsletter'].includes(r.category) ? r.category : 'important'; // unknown -> a human looks at it\n  if (category === 'routine' && (cfg.ignoreSenders || []).some(s => mail.from?.toLowerCase().includes(s))) category = 'newsletter';\n  if (category === 'routine' && !String(r.reply || '').trim()) category = 'important';\n  return { json: { ...mail, category, summary: String(r.summary || mail.body?.slice(0, 200) || ''), reply: String(r.reply || ''),\n    confidence: Number(r.confidence) || 0, autoSend: !!cfg.autoSend, gmailLink: 'https://mail.google.com/mail/u/0/#all/' + (mail.threadId || mail.id || '') } };\n});"
+      },
+      "name": "Parse & Route",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        200,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "typeValidation": "loose",
+                  "version": 2
+                },
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.category }}",
+                    "rightValue": "urgent",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ]
+              },
+              "renameOutput": true,
+              "outputKey": "urgent"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "typeValidation": "loose",
+                  "version": 2
+                },
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.category }}",
+                    "rightValue": "important",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ]
+              },
+              "renameOutput": true,
+              "outputKey": "important"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "typeValidation": "loose",
+                  "version": 2
+                },
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.category }}",
+                    "rightValue": "routine",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ]
+              },
+              "renameOutput": true,
+              "outputKey": "routine"
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": true,
+                  "typeValidation": "loose",
+                  "version": 2
+                },
+                "combinator": "and",
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.category }}",
+                    "rightValue": "newsletter",
+                    "operator": {
+                      "type": "string",
+                      "operation": "equals"
+                    }
+                  }
+                ]
+              },
+              "renameOutput": true,
+              "outputKey": "newsletter"
+            }
+          ]
+        },
+        "options": {}
+      },
+      "name": "Category",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.2,
+      "position": [
+        420,
+        0
+      ]
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "resource": "message",
+        "guildId": {
+          "__rl": true,
+          "value": "YOUR_DISCORD_SERVER_ID",
+          "mode": "id"
+        },
+        "channelId": {
+          "__rl": true,
+          "value": "YOUR_DISCORD_CHANNEL_ID",
+          "mode": "id"
+        },
+        "options": {},
+        "content": "=🔴 **Urgent email** — handle personally\n**From:** {{ $json.fromName }} <{{ $json.from }}>\n**Subject:** {{ $json.subject }}\n{{ $json.summary }}\n<{{ $json.gmailLink }}>"
+      },
+      "name": "Discord: Urgent",
+      "type": "n8n-nodes-base.discord",
+      "typeVersion": 2,
+      "position": [
+        700,
+        -300
+      ],
+      "credentials": {
+        "discordOAuth2Api": {
+          "id": "",
+          "name": "Discord Bot"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "resource": "message",
+        "guildId": {
+          "__rl": true,
+          "value": "YOUR_DISCORD_SERVER_ID",
+          "mode": "id"
+        },
+        "channelId": {
+          "__rl": true,
+          "value": "YOUR_DISCORD_CHANNEL_ID",
+          "mode": "id"
+        },
+        "options": {},
+        "content": "=🟡 **Important, not urgent** — schedule it\n**From:** {{ $json.fromName }} <{{ $json.from }}>\n**Subject:** {{ $json.subject }}\n{{ $json.summary }}\n<{{ $json.gmailLink }}>"
+      },
+      "name": "Discord: Plan It",
+      "type": "n8n-nodes-base.discord",
+      "typeVersion": 2,
+      "position": [
+        700,
+        -120
+      ],
+      "credentials": {
+        "discordOAuth2Api": {
+          "id": "",
+          "name": "Discord Bot"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "conditions": {
+          "options": {
+            "caseSensitive": true,
+            "typeValidation": "loose",
+            "version": 2
+          },
+          "conditions": [
+            {
+              "leftValue": "={{ $json.autoSend }}",
+              "rightValue": true,
+              "operator": {
+                "type": "boolean",
+                "operation": "true",
+                "singleValue": true
+              }
+            }
+          ],
+          "combinator": "and"
+        },
+        "options": {}
+      },
+      "name": "Auto Send?",
+      "type": "n8n-nodes-base.if",
+      "typeVersion": 2.2,
+      "position": [
+        700,
+        60
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "message",
+        "operation": "reply",
+        "messageId": "={{ $json.id }}",
+        "emailType": "text",
+        "message": "={{ $json.reply }}",
+        "options": {}
+      },
+      "name": "Gmail: Send Reply",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        940,
+        -20
+      ],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "",
+          "name": "Gmail"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "resource": "draft",
+        "operation": "create",
+        "subject": "=Re: {{ $json.subject }}",
+        "emailType": "text",
+        "message": "={{ $json.reply }}",
+        "options": {
+          "threadId": "={{ $json.threadId }}",
+          "sendTo": "={{ $json.from }}"
+        }
+      },
+      "name": "Gmail: Save Draft",
+      "type": "n8n-nodes-base.gmail",
+      "typeVersion": 2.1,
+      "position": [
+        940,
+        140
+      ],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "",
+          "name": "Gmail"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "resource": "message",
+        "guildId": {
+          "__rl": true,
+          "value": "YOUR_DISCORD_SERVER_ID",
+          "mode": "id"
+        },
+        "channelId": {
+          "__rl": true,
+          "value": "YOUR_DISCORD_CHANNEL_ID",
+          "mode": "id"
+        },
+        "options": {},
+        "content": "=🟢 **Routine email answered** ({{ $('Parse & Route').item.json.autoSend ? 'sent' : 'draft saved, review in Gmail' }})\n**To:** {{ $('Parse & Route').item.json.from }} — {{ $('Parse & Route').item.json.subject }}\n**Reply:** {{ $('Parse & Route').item.json.reply.slice(0, 600) }}"
+      },
+      "name": "Discord: Reply Note",
+      "type": "n8n-nodes-base.discord",
+      "typeVersion": 2,
+      "position": [
+        1180,
+        60
+      ],
+      "credentials": {
+        "discordOAuth2Api": {
+          "id": "",
+          "name": "Discord Bot"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    },
+    {
+      "parameters": {
+        "jsCode": "// Keep newsletter summaries until the next digest (workflow static data; persists in production runs).\nconst sd = $getWorkflowStaticData('global');\nsd.newsletters = sd.newsletters || [];\nfor (const it of $input.all()) sd.newsletters.push({ from: it.json.fromName || it.json.from, subject: it.json.subject, summary: it.json.summary, at: new Date().toISOString() });\nsd.newsletters = sd.newsletters.slice(-200);\nreturn [{ json: { queued: $input.all().length, total: sd.newsletters.length } }];"
+      },
+      "name": "Queue Newsletter",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        700,
+        260
+      ]
+    },
+    {
+      "parameters": {
+        "rule": {
+          "interval": [
+            {
+              "field": "cronExpression",
+              "expression": "30 7,19 * * *"
+            }
+          ]
+        }
+      },
+      "name": "Twice a Day (07:30, 19:30)",
+      "type": "n8n-nodes-base.scheduleTrigger",
+      "typeVersion": 1.2,
+      "position": [
+        420,
+        460
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Build the twice-daily newsletter digest and clear the queue.\nconst sd = $getWorkflowStaticData('global');\nconst items = sd.newsletters || [];\nif (!items.length) return [];\nsd.newsletters = [];\nconst lines = items.slice(0, 40).map(n => `• **${n.from}** — ${n.subject}\\n  ${n.summary}`);\nlet content = `📰 **Newsletter digest** (${items.length})\\n` + lines.join('\\n');\nif (content.length > 1950) content = content.slice(0, 1940) + '\\n…';\nreturn [{ json: { content } }];"
+      },
+      "name": "Build Newsletter Digest",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        700,
+        460
+      ]
+    },
+    {
+      "parameters": {
+        "authentication": "oAuth2",
+        "resource": "message",
+        "guildId": {
+          "__rl": true,
+          "value": "YOUR_DISCORD_SERVER_ID",
+          "mode": "id"
+        },
+        "channelId": {
+          "__rl": true,
+          "value": "YOUR_DISCORD_CHANNEL_ID",
+          "mode": "id"
+        },
+        "options": {},
+        "content": "={{ $json.content }}"
+      },
+      "name": "Discord: Newsletter Digest",
+      "type": "n8n-nodes-base.discord",
+      "typeVersion": 2,
+      "position": [
+        940,
+        460
+      ],
+      "credentials": {
+        "discordOAuth2Api": {
+          "id": "",
+          "name": "Discord Bot"
+        }
+      },
+      "retryOnFail": true,
+      "maxTries": 3,
+      "waitBetweenTries": 5000
+    }
+  ],
+  "connections": {
+    "Gmail Trigger": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Manual Test": {
+      "main": [
+        [
+          {
+            "node": "Sample Emails",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Sample Emails": {
+      "main": [
+        [
+          {
+            "node": "Config",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Config": {
+      "main": [
+        [
+          {
+            "node": "Normalize & Build Prompt",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Normalize & Build Prompt": {
+      "main": [
+        [
+          {
+            "node": "Gemini Classifier",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gemini Classifier": {
+      "main": [
+        [
+          {
+            "node": "Parse & Route",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse & Route": {
+      "main": [
+        [
+          {
+            "node": "Category",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Category": {
+      "main": [
+        [
+          {
+            "node": "Discord: Urgent",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Discord: Plan It",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Auto Send?",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Queue Newsletter",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Auto Send?": {
+      "main": [
+        [
+          {
+            "node": "Gmail: Send Reply",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Gmail: Save Draft",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gmail: Send Reply": {
+      "main": [
+        [
+          {
+            "node": "Discord: Reply Note",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Gmail: Save Draft": {
+      "main": [
+        [
+          {
+            "node": "Discord: Reply Note",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Twice a Day (07:30, 19:30)": {
+      "main": [
+        [
+          {
+            "node": "Build Newsletter Digest",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Build Newsletter Digest": {
+      "main": [
+        [
+          {
+            "node": "Discord: Newsletter Digest",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "settings": {
+    "executionOrder": "v1"
+  }
+}
